@@ -28,14 +28,37 @@ SP100 = [
 
 
 def load_ohlc(ticker):
-    path = os.path.join(DATA_DIR, f"ohlc_{ticker}.json")
-    if not os.path.exists(path):
+    fpath = os.path.join(DATA_DIR, f"ohlc_{ticker}.json")
+    if not os.path.exists(fpath):
         return None
-    df = pd.read_json(path)
-    if "date" not in df.columns:
+    raw = json.load(open(fpath))
+    # Handle AV format: {"data": {"YYYY-MM-DD": {"1. open":..., "4. close":..., "6. volume":...}}}
+    if isinstance(raw, dict) and "data" in raw:
+        inner = raw["data"]
+        rows = []
+        for d, v in inner.items():
+            try:
+                rows.append({
+                    "date": datetime.date.fromisoformat(d),
+                    "open":   float(v.get("1. open",  v.get("open",  0))),
+                    "close":  float(v.get("4. close", v.get("close", 0))),
+                    "volume": float(v.get("6. volume",v.get("volume",0))),
+                })
+            except Exception:
+                continue
+        if not rows:
+            return None
+        df = pd.DataFrame(rows).set_index("date").sort_index()
+        return df
+    # Handle flat list format: [{"date":..., "open":..., "close":..., "volume":...}]
+    try:
+        df = pd.read_json(fpath)
+        if "date" not in df.columns:
+            return None
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        return df.set_index("date").sort_index()
+    except Exception:
         return None
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    return df.set_index("date").sort_index()
 
 
 def load_trump_regime() -> dict:
