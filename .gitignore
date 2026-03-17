@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+data/regime_cache.json
+data/backtest_results.json
+data/ohlc_*.json

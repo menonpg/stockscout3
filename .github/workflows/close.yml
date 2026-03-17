@@ -1,0 +1,26 @@
+name: Close Positions (4:00 PM)
+
+on:
+  schedule:
+    - cron: '0 20 * * 1-5'    # 4:00 PM EST = 20:00 UTC Mon-Fri
+  workflow_dispatch:
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - name: Close positions + log P&L
+        run: python -m stockscout3.portfolio close
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      - name: Commit results
+        run: |
+          git config user.name "stockscout3-bot"
+          git config user.email "bot@themenonlab.com"
+          git add data/trades/ || true
+          git diff --cached --quiet || git commit -m "close: $(date -u +%Y-%m-%d)"
+          git push || true

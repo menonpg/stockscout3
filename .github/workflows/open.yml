@@ -1,0 +1,26 @@
+name: Open Positions (9:30 AM)
+
+on:
+  schedule:
+    - cron: '30 13 * * 1-5'   # 9:30 AM EST = 13:30 UTC Mon-Fri
+  workflow_dispatch:
+
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - name: Open positions
+        run: python -m stockscout3.portfolio open
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      - name: Commit trade file
+        run: |
+          git config user.name "stockscout3-bot"
+          git config user.email "bot@themenonlab.com"
+          git add data/trades/ || true
+          git diff --cached --quiet || git commit -m "open: $(date -u +%Y-%m-%d)"
+          git push || true

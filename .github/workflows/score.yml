@@ -1,0 +1,26 @@
+name: Score (8:30 AM)
+
+on:
+  schedule:
+    - cron: '30 12 * * 1-5'   # 8:30 AM EST = 12:30 UTC Mon-Fri
+  workflow_dispatch:
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - name: Score universe
+        run: python -m stockscout3.scorer
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      - name: Commit scores
+        run: |
+          git config user.name "stockscout3-bot"
+          git config user.email "bot@themenonlab.com"
+          git add data/scores_latest.json || true
+          git diff --cached --quiet || git commit -m "scores: $(date -u +%Y-%m-%d)"
+          git push || true
