@@ -66,13 +66,11 @@ def build():
     r_color = "#22c55e" if r.get("total_pnl",0) >= 0 else "#ef4444"
 
     b_kpis = (kpi("Return", f"{b['total_pnl_pct']:+.2f}%", f"${b['total_pnl']:+,.0f}", b_color) +
-              kpi("SPY", f"{b['spy_pct']:+.2f}%", "benchmark", "#6b7280") +
               kpi("Sharpe", f"{b['sharpe_annualized']:.3f}", "", "#f59e0b") +
               kpi("Max DD", f"${b['max_drawdown']:,.0f}", "", "#ef4444") +
               kpi("Trades", str(b['total_trades']), f"Hit {b['hit_rate_pct']:.1f}%", "#f59e0b"))
 
     r_kpis = (kpi("Return", f"{r['total_pnl_pct']:+.2f}%", f"${r['total_pnl']:+,.0f}", r_color) +
-              kpi("SPY", f"{r['spy_pct']:+.2f}%", "benchmark", "#6b7280") +
               kpi("Sharpe", f"{r['sharpe_annualized']:.3f}", "", "#22c55e") +
               kpi("Max DD", f"${r['max_drawdown']:,.0f}", "", "#ef4444") +
               kpi("Bearish skip", str(r.get('bearish_days_skipped',0)), "days avoided", "#22c55e")
@@ -85,7 +83,7 @@ def build():
     cmp_regime = (f'<th>Regime Gate</th>' if r else '')
     cmp_rows = ""
     metrics = [
-        ("Return", f"{b['total_pnl_pct']:+.2f}%", f"{r.get('total_pnl_pct',0):+.2f}%" if r else "", f"{b['spy_pct']:+.2f}%"),
+        ("Return", f"{b['total_pnl_pct']:+.2f}%", f"{r.get('total_pnl_pct',0):+.2f}%" if r else "", "N/A"),
         ("P&L ($)", f"${b['total_pnl']:+,.0f}", f"${r.get('total_pnl',0):+,.0f}" if r else "", "—"),
         ("Sharpe", f"{b['sharpe_annualized']:.3f}", f"{r.get('sharpe_annualized',0):.3f}" if r else "", "—"),
         ("Max DD", f"${b['max_drawdown']:,.0f}", f"${r.get('max_drawdown',0):,.0f}" if r else "", "—"),
