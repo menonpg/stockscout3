@@ -44,7 +44,9 @@ jobs:
         run: python3 stockscout3/report.py
 
       - name: Generate live dashboard
-        run: python3 stockscout3/dashboard.py
+        run: |
+          mkdir -p data/trades
+          python3 stockscout3/dashboard.py
 
       - name: Publish to pi-workspace
         env:
