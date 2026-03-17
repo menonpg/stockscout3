@@ -1,0 +1,70 @@
+name: Backtest
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'stockscout3/backtest.py'
+      - 'stockscout3/regime.py'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+
+      - run: pip install pandas numpy requests yfinance
+
+      - name: Fetch OHLC cache from stockscout-backtest
+        run: |
+          python3 - << 'PYEOF'
+          import subprocess, os
+          subprocess.run([
+            "git", "clone", "--depth=1",
+            "https://github.com/menonpg/stockscout-backtest.git",
+            "tmp-backtest-cache"
+          ], check=True)
+          import glob, shutil
+          os.makedirs("data", exist_ok=True)
+          for f in glob.glob("tmp-backtest-cache/data/ohlc_*.json"):
+              shutil.copy(f, "data/")
+          print(f"Copied {len(glob.glob('data/ohlc_*.json'))} OHLC files")
+          PYEOF
+
+      - name: Fetch Trump predictions
+        run: |
+          python3 - << 'PYEOF'
+          import requests, json
+          r = requests.get("https://raw.githubusercontent.com/sstklen/trump-code/main/data/predictions_log.json", timeout=30)
+          r.raise_for_status()
+          data = r.json()
+          json.dump(data, open("data/trump_predictions.json","w"), indent=2)
+          print(f"Fetched {len(data)} predictions")
+          PYEOF
+
+      - name: Run backtest (baseline + regime)
+        run: python3 -m stockscout3.backtest --start 2024-01-01 --verbose
+
+      - name: Generate report
+        run: python3 stockscout3/report.py
+
+      - name: Copy dashboard to pi-workspace
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
+        run: |
+          git clone --depth=1 https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git tmp-pi
+          mkdir -p tmp-pi/docs/stockscout3
+          cp data/stockscout3_report.html tmp-pi/docs/stockscout3/index.html
+          cp data/backtest_baseline.json tmp-pi/docs/stockscout3/ || true
+          cp data/backtest_regime.json   tmp-pi/docs/stockscout3/ || true
+          cd tmp-pi
+          git config user.name "stockscout3-bot"
+          git config user.email "bot@themenonlab.com"
+          git add docs/stockscout3/
+          git diff --cached --quiet || git commit -m "backtest: stockscout3 regime vs baseline $(date -u +%Y-%m-%d)"
+          git push
