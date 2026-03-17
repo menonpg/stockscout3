@@ -172,8 +172,9 @@ def run(start, end, use_regime=True, verbose=False):
     spy_ret_total = (spy_end / spy_start - 1) * 100
 
     pnls = np.array([d["pnl"] for d in daily])
-    invested = TRADE_SIZE * N_PICKS * max(len([p for p in pnls if p != 0]), 1)
-    ret_pct = portfolio_val / invested * 100
+    # Return on base capital (1 day's deployment = TRADE_SIZE * N_PICKS)
+    base_capital = TRADE_SIZE * N_PICKS
+    ret_pct = portfolio_val / base_capital * 100
     sharpe = float(np.mean(pnls) / np.std(pnls) * np.sqrt(252)) if np.std(pnls) > 0 else 0
     cum = np.cumsum(pnls)
     dd = float(np.min(cum - np.maximum.accumulate(cum)))

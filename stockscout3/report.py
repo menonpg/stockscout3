@@ -75,6 +75,16 @@ def build():
     if r.get("daily"):
         chart_js += cum_chart(r["daily"], "r_cum", "#22c55e")
 
+    trade_rows = ""
+    for t in (b.get("trades") or [])[:50]:
+        pnl = t.get("pnl", 0)
+        trade_rows += (f'<tr><td>{t["date"]}</td><td><b>{t["ticker"]}</b></td>'
+                       f'<td>{t["shares"]}</td><td>${t["entry"]:.2f}</td>'
+                       f'<td>${t["exit"]:.2f}</td>'
+                       f'<td class="{"up" if pnl>=0 else "down"}">${pnl:+.2f}</td></tr>')
+    if not trade_rows:
+        trade_rows = '<tr><td colspan="6" style="color:#6b7280;text-align:center">No trades</td></tr>'
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -168,6 +178,17 @@ h2{{font-size:1.1rem;color:#8b949e;margin-bottom:16px;padding-bottom:8px;border-
 <script>
 {chart_js}
 </script>
+
+<div class="section" style="margin-top:24px">
+  <h2>&#128203; Baseline Trade Book (first 50)</h2>
+  <div class="compare">
+    <table>
+      <thead><tr><th>Date</th><th>Ticker</th><th>Shares</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
+      <tbody>{{trade_rows}}</tbody>
+    </table>
+  </div>
+</div>
+
 </body>
 </html>"""
 
