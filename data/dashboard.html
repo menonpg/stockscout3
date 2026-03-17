@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StockScout 3</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;max-width:1200px;margin:0 auto}
+header{padding:16px 0 24px;border-bottom:1px solid #30363d;margin-bottom:24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:1.5rem}header h1 span{color:#8b949e;font-size:.9rem;margin-left:8px}
+.nav a{color:#58a6ff;font-size:.8rem;text-decoration:none;background:#161b22;border:1px solid #30363d;padding:4px 10px;border-radius:6px;margin-right:6px}
+.nav a:hover{border-color:#58a6ff}
+#updated{font-size:.75rem;color:#6b7280;margin-left:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px}
+.card h2{font-size:.85rem;color:#8b949e;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid #21262d}
+.kpis{display:flex;gap:16px;flex-wrap:wrap}
+.kpi{flex:1;min-width:80px}
+.kpi-val{font-size:1.4rem;font-weight:700}
+.kpi-label{font-size:.7rem;color:#8b949e;margin-top:2px}
+.regime-box{display:flex;align-items:center;gap:12px}
+.regime-badge{font-size:1.1rem;font-weight:700;padding:6px 14px;border-radius:6px}
+.regime-detail{font-size:.75rem;color:#8b949e}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th{color:#8b949e;font-size:.72rem;padding:8px 10px;text-align:left;border-bottom:1px solid #21262d}
+td{padding:7px 10px;border-bottom:1px solid #161b22}
+tr:hover td{background:#161b22}
+tr.pick td{color:#22c55e}
+tr.gapped td{color:#6b7280}
+.badge-pick{background:#22c55e22;color:#22c55e;font-size:.6rem;padding:1px 5px;border-radius:3px;margin-left:4px}
+.badge-gap{background:#ef444422;color:#ef4444;font-size:.6rem;padding:1px 5px;border-radius:3px;margin-left:4px}
+.up{color:#22c55e}.down{color:#ef4444}.neutral{color:#8b949e}
+.full{grid-column:1/-1}
+</style>
+</head>
+<body>
+<header>
+  <h1>&#128270; StockScout 3 <span>Regime-Gated Momentum Scorer</span></h1>
+  <div class="nav">
+    <a href="/stockscout/">v1</a>
+    <a href="/stockscout2/">v2</a>
+    <a href="/stockscout3/backtest/">Backtest</a>
+    <a href="https://github.com/menonpg/stockscout3" target="_blank">GitHub</a>
+  </div>
+  <div id="updated">Scores: 2026-03-17</div>
+</header>
+
+<div class="grid">
+
+  <!-- Regime Card -->
+  <div class="card">
+    <h2>&#127968; Macro Regime (Trump Code)</h2>
+    <div class="regime-box">
+      <div class="regime-badge" style="background:#8b949e22;color:#8b949e">NEUTRAL</div>
+      <div class="regime-detail">No signal today</div>
+    </div>
+    <div style="margin-top:12px;font-size:.72rem;color:#6b7280">
+      Source: sstklen/trump-code &middot; Updated daily
+    </div>
+  </div>
+
+  <!-- KPI Card -->
+  <div class="card">
+    <h2>&#128200; Performance</h2>
+    <div class="kpis">
+      <div class="kpi">
+        <div class="kpi-val up">$+0</div>
+        <div class="kpi-label">Total P&amp;L</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-val">0</div>
+        <div class="kpi-label">Days traded</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-val">0%</div>
+        <div class="kpi-label">Win rate</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Equity Curve -->
+  <div class="card">
+    <h2>&#128185; Equity Curve</h2>
+    <canvas id="equity" height="80"></canvas>
+  </div>
+
+</div>
+
+<!-- Today's Positions -->
+<div class="card" style="margin-bottom:16px">
+  <h2>&#128197; Today's Positions — 2026-03-17</h2>
+  <table>
+    <thead><tr><th>Ticker</th><th>Entry</th><th>Shares</th><th>Cost</th><th>Status</th></tr></thead>
+    <tbody><tr><td colspan="5" style="color:#6b7280;text-align:center">No open positions today</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Scores Table -->
+<div class="card" style="margin-bottom:16px">
+  <h2>&#128202; Today's Scores (Top 20)</h2>
+  <table>
+    <thead><tr><th>Ticker</th><th>Score</th><th>VST</th><th>RS</th><th>RT</th><th>Gap</th></tr></thead>
+    <tbody><tr><td colspan="6" style="color:#6b7280;text-align:center">Run score workflow to populate</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Trade History -->
+<div class="card">
+  <h2>&#128203; Trade History</h2>
+  <table>
+    <thead><tr><th>Date</th><th>Tickers</th><th>P&amp;L</th><th>Regime</th></tr></thead>
+    <tbody><tr><td colspan="4" style="color:#6b7280;text-align:center">No closed trades yet</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+new Chart(document.getElementById('equity'), {
+  type:'line',
+  data:{
+    labels:[],
+    datasets:[{
+      data:[],
+      borderColor:'#22c55e',
+      backgroundColor:'#22c55e22',
+      fill:true, pointRadius:0, tension:0.3
+    }]
+  },
+  options:{responsive:true,plugins:{legend:{display:false}},
+    scales:{
+      y:{grid:{color:'#30363d'},ticks:{color:'#8b949e',callback:v=>'$'+v}},
+      x:{ticks:{color:'#8b949e',maxTicksLimit:8},grid:{display:false}}
+    }
+  }
+});
+</script>
+</body>
+</html>

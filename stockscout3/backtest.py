@@ -1,315 +1,342 @@
 #!/usr/bin/env python3
 """
-backtest.py — StockScout 3 backtester
-Mirrors simulate.py logic exactly:
-  - Signal day D: score universe
-  - Execution day D+1: buy at open, sell at close
-  - Gap filter: skip if D+1 open > D close * (1 + gap_thresh)
-  - Regime gate: skip entire day if Trump Code says BEARISH
+simulate.py — Walk through scored history, pick top N each day,
+measure next-day open → close return, compute hit rate + P&L.
 
-OHLC format expected: {"data": {"YYYY-MM-DD": {"1. open":..., "4. close":..., "6. volume":...}}}
+Outputs: backtest/data/results.json
 """
 
-import json, os, sys, argparse, datetime, statistics
-from pathlib import Path
+import json, os, sys
+from datetime import datetime
 
-DATA_DIR   = os.path.join(os.path.dirname(__file__), "..", "data")
-TRUMP_LOG  = os.path.join(DATA_DIR, "trump_predictions.json")
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR   = os.path.join(BASE_DIR, "..", "data")
+HIST_FILE  = os.path.join(DATA_DIR, "scored_history.json")
+OUT_FILE   = os.path.join(DATA_DIR, "results.json")
 
-TOP_N        = 5
-POSITION_SZ  = 10000   # $10K per position = $50K total capital (matches simulate.py)
-GAP_THRESH   = 0.005   # 0.5% gap filter
+TOP_N        = 5      # picks per day
+POSITION_SZ  = 10000  # dollars per position — $10K × 5 = $50K total capital deployed per day
 
-SP100 = [
-    "AAPL","ABBV","ABT","ACN","ADBE","ADI","ADP","AMGN","AMT","AMZN",
-    "AVGO","AXP","BAC","BK","BKNG","BLK","BMY","BRK-B","C","CAT",
-    "CB","CHTR","CL","CMCSA","COF","COP","CRM","CSCO","CVS","CVX",
-    "DE","DHR","DIS","DUK","EMR","EXC","F","FDX","GD","GE","GILD",
-    "GM","GOOG","GOOGL","GS","HD","HON","HUM","IBM","INTC","INTU",
-    "JNJ","JPM","KHC","KO","LIN","LLY","LMT","LOW","MA","MCD","MCO",
-    "MDT","MET","META","MMC","MMM","MO","MRK","MS","MSFT","NEE","NFLX",
-    "NKE","NOW","NSC","NVDA","ORCL","PEP","PFE","PG","PM","PYPL",
-    "QCOM","RTX","SBUX","SCHW","SO","SPG","T","TGT","TMO","TMUS",
-    "TXN","UNH","UNP","UPS","USB","V","VZ","WFC","WMT","XOM",
-]
+# Ranking modes:
+#   "equal"  — sort by vst (rv+rs+rt)/3  [original]
+#   "safety" — sort by RS*0.5 + RT*0.3 + VST*0.2  [production portfolio.py logic]
+import argparse
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--mode",        default="safety",  choices=["equal","safety","intraday"])
+_parser.add_argument("--min-vst",     type=float, default=1.0,   help="Min VST threshold (try 1.0/1.5/2.0/2.5)")
+_parser.add_argument("--max-beta",    type=float, default=99.0,  help="Max beta filter (try 1.3, 1.5)")
+_parser.add_argument("--max-gap-pct", type=float, default=99.0,  help="Skip if open gap > X%% vs prior close (try 0.5, 1.0)")
+_parser.add_argument("--vix-max",     type=float, default=99.0,  help="Skip trading days when VIX > X (try 25, 30)")
+_parser.add_argument("--out-suffix",  type=str,   default="",    help="Suffix appended to results filename, e.g. _vst15")
+_args, _ = _parser.parse_known_args()
+RANK_MODE    = _args.mode
+MIN_VST      = _args.min_vst
+MAX_BETA     = _args.max_beta
+MAX_GAP_PCT  = _args.max_gap_pct
+VIX_MAX      = _args.vix_max
+OUT_SUFFIX   = _args.out_suffix
 
+def rank_score(c):
+    if RANK_MODE == "safety":
+        # Production logic: RS-heavy (good for multi-day, bad intraday)
+        return c["rs"] * 0.5 + c["rt"] * 0.3 + c["vst"] * 0.2
+    elif RANK_MODE == "intraday":
+        # RT-dominant: favor recent trajectory over relative strength
+        # RS inverted slightly — avoid names already extended vs market
+        return c["rt"] * 0.6 + c["vst"] * 0.3 - c["rs"] * 0.1
+    return c["vst"]  # equal: sort by vst only
 
-def load_ohlc_all():
-    """Load all ohlc_*.json files. Returns {ticker: {date_str: {open, close, volume}}}"""
-    ohlc = {}
-    data_path = Path(DATA_DIR)
-    for f in data_path.glob("ohlc_*.json"):
-        ticker = f.stem[5:]  # strip "ohlc_"
-        try:
-            raw = json.loads(f.read_text())
-            inner = raw.get("data", {})
-            ohlc[ticker] = {
-                d: {
-                    "open":   float(v.get("1. open",  0)),
-                    "close":  float(v.get("4. close", v.get("5. adjusted close", 0))),
-                    "volume": float(v.get("6. volume", 0)),
-                }
-                for d, v in inner.items()
-            }
-        except Exception as e:
-            pass
-    return ohlc
+# ── Trump regime gate ────────────────────────────────────────────────────────
+import collections as _col
 
-
-def load_trump_regime():
-    """Returns {date_str: multiplier} 1.0=bullish 0.5=neutral 0.0=bearish"""
-    import collections
-    if not os.path.exists(TRUMP_LOG):
+def _load_trump_regime():
+    import os as _os
+    trump_path = _os.path.join(DATA_DIR, "trump_predictions.json")
+    if not _os.path.exists(trump_path):
         return {}
-    log = json.load(open(TRUMP_LOG))
+    log = json.load(open(trump_path))
     DIR_MAP = {"LONG":1.0,"UP":1.0,"SHORT":0.0,"DOWN":0.0,"VOLATILE":0.5,"NEUTRAL":0.5}
-    by_date = collections.defaultdict(list)
+    by_date = _col.defaultdict(list)
     for rec in log:
         d = str(rec.get("date_signal",""))[:10]
         if d:
             by_date[d].append(DIR_MAP.get(str(rec.get("direction","")).upper(), 0.5))
     result = {}
     for d, votes in by_date.items():
-        vc = collections.Counter(votes)
+        vc = _col.Counter(votes)
         result[d] = 0.0 if (vc[0.0] > 0 and vc[1.0] == 0) else vc.most_common(1)[0][0]
     return result
 
+_parser.add_argument("--regime", action="store_true", help="Enable Trump Code regime gate")
+_args, _ = _parser.parse_known_args()
+USE_REGIME = _args.regime
+TRUMP_REGIME = _load_trump_regime() if USE_REGIME else {}
+if USE_REGIME:
+    print(f"Trump regime gate: ON ({len(TRUMP_REGIME)} days loaded)")
 
-def score_ticker(ticker, ohlc_data, signal_date, trading_dates):
-    """Score a ticker on signal_date using VST+RS+RT. Returns dict or None."""
-    dates = sorted(ohlc_data.keys())
-    if signal_date not in dates:
-        return None
-    idx = dates.index(signal_date)
-    if idx < 22:
-        return None
+if not os.path.exists(HIST_FILE):
+    print("ERROR: scored_history.json not found. Run score_history.py first.")
+    sys.exit(1)
 
-    # Build arrays
-    closes  = [ohlc_data[d]["close"]  for d in dates]
-    volumes = [ohlc_data[d]["volume"] for d in dates]
+history = json.load(open(HIST_FILE))
+trading_dates = sorted(history.keys())
 
-    c   = closes[idx]
-    c22 = closes[idx - 22]
-    c5  = closes[idx - 5]
+print(f"Loaded {len(trading_dates)} scored trading days")
+print(f"Simulating top-{TOP_N} picks, min VST={MIN_VST}, max_beta={MAX_BETA}, "
+      f"max_gap={MAX_GAP_PCT}%, vix_max={VIX_MAX}, ${POSITION_SZ}/position\n")
 
-    avg_vol5  = sum(volumes[idx-4:idx+1]) / 5
-    avg_vol20 = sum(volumes[idx-19:idx+1]) / 20
+# Build OHLC lookup for next-day open/close
+ticker_ohlc = {}
+for fname in os.listdir(DATA_DIR):
+    if fname.startswith("ohlc_") and fname.endswith(".json"):
+        ticker = fname[5:-5]
+        try:
+            d = json.load(open(os.path.join(DATA_DIR, fname)))
+            ticker_ohlc[ticker] = d.get("data", {})
+        except:
+            pass
 
-    vst = avg_vol5 / avg_vol20 if avg_vol20 > 0 else 1.0
-    rt  = (c - c5)  / c5  if c5  > 0 else 0.0
-    # RS computed against SPY — passed in externally
-    return {"vst": vst, "rt": rt, "close": c}
+# Build beta lookup from fund files
+ticker_beta = {}
+for fname in os.listdir(DATA_DIR):
+    if fname.startswith("fund_") and fname.endswith(".json"):
+        ticker = fname[5:-5]
+        try:
+            d = json.load(open(os.path.join(DATA_DIR, fname)))
+            b = d.get("Beta", "")
+            ticker_beta[ticker] = float(b) if b else 1.0
+        except:
+            ticker_beta[ticker] = 1.0
 
+# VIX by date (from ohlc_VIX.json if fetched, else skip filter)
+vix_by_date = {}
+vix_path = os.path.join(DATA_DIR, "ohlc_VIX.json")  # or ohlc_^VIX.json
+if not os.path.exists(vix_path):
+    vix_path = os.path.join(DATA_DIR, "ohlc_^VIX.json")
+if os.path.exists(vix_path):
+    try:
+        vd = json.load(open(vix_path)).get("data", {})
+        for dt, row in vd.items():
+            c = row.get("4. close") or row.get("5. adjusted close")
+            if c: vix_by_date[dt] = float(c)
+    except:
+        pass
 
-def run(start="2024-01-01", end=None, use_regime=True, verbose=False):
-    if end is None:
-        end = str(datetime.date.today())
+def get_open(ticker, date_str):
+    ohlc = ticker_ohlc.get(ticker, {})
+    row  = ohlc.get(date_str, {})
+    try:
+        return float(row.get("1. open") or 0)
+    except:
+        return 0
 
-    print(f"Loading OHLC data...")
-    ohlc = load_ohlc_all()
-    print(f"  {len(ohlc)} tickers loaded")
+def get_close(ticker, date_str):
+    ohlc = ticker_ohlc.get(ticker, {})
+    row  = ohlc.get(date_str, {})
+    try:
+        return float(row.get("4. close") or row.get("5. adjusted close") or 0)
+    except:
+        return 0
 
-    spy_ohlc = ohlc.get("SPY", {})
-    if not spy_ohlc:
-        print("ERROR: SPY data missing"); return None
+# ── Simulation ────────────────────────────────────────────────────────────────
 
-    trump = load_trump_regime() if use_regime else {}
-    if use_regime:
-        print(f"  Trump regime: {len(trump)} days loaded")
+daily_results   = []
+cumulative_pnl  = 0.0
+total_trades    = 0
+wins            = 0
+losses          = 0
+no_data_days    = 0
 
-    # All trading dates from SPY, filtered to range
-    trading_dates = sorted(d for d in spy_ohlc if start <= d <= end)
-    print(f"  Trading days: {len(trading_dates)} ({trading_dates[0]} to {trading_dates[-1]})")
+for i, day in enumerate(trading_dates[:-1]):  # need a "next day"
+    next_day   = trading_dates[i + 1]
+    candidates = history[day]
 
-    # Precompute SPY 22d return for each date (for RS)
-    spy_dates  = sorted(spy_ohlc.keys())
-    spy_ret22  = {}
-    for i, d in enumerate(spy_dates):
-        if i >= 22:
-            spy_ret22[d] = (spy_ohlc[d]["close"] / spy_ohlc[spy_dates[i-22]]["close"]) - 1
-
-    daily_results  = []
-    cumulative_pnl = 0.0
-    total_trades   = 0
-    wins = losses  = 0
-    bearish_skipped = 0
-
-    for i, signal_day in enumerate(trading_dates[:-1]):
-        exec_day = trading_dates[i + 1]
-
-        # Regime gate
-        if use_regime:
-            regime = trump.get(signal_day, 0.5)
-            if regime == 0.0:
-                bearish_skipped += 1
-                daily_results.append({"date": signal_day, "picks": [], "day_pnl": 0,
-                    "cumulative_pnl": round(cumulative_pnl, 2), "note": "BEARISH regime"})
-                continue
-
-        # Score all tickers on signal_day
-        spy_20d = spy_ret22.get(signal_day, 0.0)
-        scored = []
-        for ticker in SP100:
-            td = ohlc.get(ticker)
-            if not td:
-                continue
-            s = score_ticker(ticker, td, signal_day, trading_dates)
-            if not s:
-                continue
-            # RS = stock 22d return - SPY 22d return
-            s22 = sorted(td.keys())
-            try:
-                idx22 = s22.index(signal_day)
-                if idx22 < 22:
-                    continue
-                rs = (s["close"] / td[s22[idx22-22]]["close"] - 1) - spy_20d
-            except (ValueError, ZeroDivisionError):
-                continue
-            score = s["vst"] * 0.5 + rs * 2.0 + s["rt"] * 1.5
-            scored.append({"ticker": ticker, "vst": round(s["vst"],3),
-                           "rs": round(rs,4), "rt": round(s["rt"],4),
-                           "score": round(score,4), "close": s["close"]})
-
-        scored.sort(key=lambda x: x["score"], reverse=True)
-
-        # Gap filter + pick top N
-        picks = []
-        for c in scored:
-            if len(picks) >= TOP_N:
-                break
-            exec_data = ohlc.get(c["ticker"], {}).get(exec_day)
-            if not exec_data:
-                continue
-            gap = (exec_data["open"] - c["close"]) / c["close"] if c["close"] > 0 else 0
-            if gap > GAP_THRESH:
-                continue  # gapped up too much
-            picks.append({**c, "exec_open": exec_data["open"], "exec_close": exec_data["close"], "gap": gap})
-
-        if not picks:
-            daily_results.append({"date": signal_day, "picks": [], "day_pnl": 0,
-                "cumulative_pnl": round(cumulative_pnl, 2), "note": "no picks"})
+    # Trump regime gate
+    if USE_REGIME:
+        regime_mult = TRUMP_REGIME.get(day, 0.5)
+        if regime_mult == 0.0:
+            daily_results.append({"date": day, "picks": [], "day_pnl": 0,
+                "cumulative_pnl": round(cumulative_pnl, 2), "note": "BEARISH regime"})
             continue
 
-        # Execute: buy open, sell close on exec_day
-        day_pnl = 0.0
-        trade_log = []
-        for p in picks:
-            o, c2 = p["exec_open"], p["exec_close"]
-            if o == 0 or c2 == 0:
-                continue
-            ret_pct = (c2 - o) / o
-            pnl     = POSITION_SZ * ret_pct
-            day_pnl += pnl
-            total_trades += 1
-            if pnl > 0: wins += 1
-            else: losses += 1
-            trade_log.append({
-                "ticker": p["ticker"], "vst": p["vst"], "rs": p["rs"], "rt": p["rt"],
-                "open": round(o,2), "close": round(c2,2),
-                "ret_pct": round(ret_pct*100, 3), "pnl": round(pnl,2), "won": pnl>0
-            })
+    # VIX day-level filter
+    if VIX_MAX < 99 and vix_by_date:
+        day_vix = vix_by_date.get(day)
+        if day_vix and day_vix > VIX_MAX:
+            daily_results.append({"date": day, "picks": [], "day_pnl": 0,
+                "cumulative_pnl": round(cumulative_pnl, 2), "note": f"skipped: VIX={day_vix:.1f}>{VIX_MAX}"})
+            continue
 
-        cumulative_pnl += day_pnl
-        regime_label = "BULLISH" if trump.get(signal_day,0.5)==1.0 else "NEUTRAL"
+    # Filter: VST threshold, beta cap, opening gap
+    eligible = []
+    for c in candidates:
+        if c["vst"] < MIN_VST:
+            continue
+        # Beta filter
+        beta = ticker_beta.get(c["ticker"], 1.0)
+        if beta > MAX_BETA:
+            continue
+        # Gap filter — compare next-day open vs current close
+        if MAX_GAP_PCT < 99:
+            cur_close  = get_close(c["ticker"], day)
+            next_open  = get_open(c["ticker"], next_day)
+            if cur_close > 0 and next_open > 0:
+                gap_pct = (next_open - cur_close) / cur_close * 100
+                if gap_pct > MAX_GAP_PCT:
+                    continue  # skip stocks that already gapped up too much
+        eligible.append(c)
+
+    eligible.sort(key=rank_score, reverse=True)
+    picks = eligible[:TOP_N]
+
+    if not picks:
         daily_results.append({
-            "date": signal_day, "next_day": exec_day,
-            "picks": trade_log, "day_pnl": round(day_pnl,2),
-            "cumulative_pnl": round(cumulative_pnl,2),
-            "regime": regime_label if use_regime else "—",
+            "date": day,
+            "picks": [],
+            "day_pnl": 0,
+            "cumulative_pnl": round(cumulative_pnl, 2),
+            "note": "no picks above threshold"
         })
-        if verbose:
-            print(f"  {signal_day}->{exec_day}  pnl=${day_pnl:+.2f}  picks={len(picks)}")
+        continue
 
-    # ── Stats ──────────────────────────────────────────────────────────────
-    total_capital = TOP_N * POSITION_SZ  # $50K
-    total_pnl_pct = cumulative_pnl / total_capital * 100
+    day_pnl   = 0
+    day_trades = []
 
-    day_pnls = [d["day_pnl"] for d in daily_results if d.get("picks")]
-    if len(day_pnls) > 1:
-        mean_p = statistics.mean(day_pnls)
-        std_p  = statistics.stdev(day_pnls)
-        sharpe = (mean_p / std_p * (252**0.5)) if std_p > 0 else 0
-    else:
-        sharpe = 0
+    for pick in picks:
+        t      = pick["ticker"]
+        open_  = get_open(t, next_day)
+        close_ = get_close(t, next_day)
 
-    peak = max_dd = running = 0
-    for d in daily_results:
-        running += d["day_pnl"]
-        peak = max(peak, running)
-        max_dd = max(max_dd, peak - running)
-
-    hit_rate = wins / total_trades * 100 if total_trades else 0
-
-    # SPY return over same period
-    spy_start = spy_ohlc.get(trading_dates[0], {}).get("close", 1)
-    spy_end   = spy_ohlc.get(trading_dates[-1], {}).get("close", 1)
-    spy_pct   = (spy_end / spy_start - 1) * 100
-
-    # Best/worst days
-    days_with_picks = [d for d in daily_results if d.get("picks")]
-    best_days  = sorted(days_with_picks, key=lambda x: x["day_pnl"], reverse=True)[:5]
-    worst_days = sorted(days_with_picks, key=lambda x: x["day_pnl"])[:5]
-
-    # Flat trade list for trade book
-    all_trades = [t for d in daily_results for t in d.get("picks",[])]
-    for d in daily_results:
-        for t in d.get("picks",[]):
-            t["date"] = d["date"]
-
-    summary = {
-        "backtest_start": trading_dates[0], "backtest_end": trading_dates[-1],
-        "use_regime": use_regime,
-        "total_trading_days": len(trading_dates),
-        "days_with_picks": len(days_with_picks),
-        "top_n": TOP_N, "position_size": POSITION_SZ, "total_capital": total_capital,
-        "total_trades": total_trades, "wins": wins, "losses": losses,
-        "hit_rate_pct": round(hit_rate, 1),
-        "total_pnl": round(cumulative_pnl, 2),
-        "total_pnl_pct": round(total_pnl_pct, 2),
-        "spy_pct": round(spy_pct, 2),
-        "sharpe_annualized": round(sharpe, 3),
-        "max_drawdown": round(max_dd, 2),
-        "bearish_days_skipped": bearish_skipped,
-    }
-
-    return {
-        "summary": summary,
-        "daily": daily_results,
-        "best_days": best_days,
-        "worst_days": worst_days,
-        "trades": [t for d in daily_results for t in d.get("picks",[])],
-    }
-
-
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--start", default="2024-01-01")
-    ap.add_argument("--end",   default=str(datetime.date.today()))
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args()
-
-    print(f"\n{'='*55}")
-    print(f"  StockScout 3 Backtest  {args.start} to {args.end}")
-    print(f"  Capital: ${TOP_N * POSITION_SZ:,}  ({TOP_N} x ${POSITION_SZ:,})")
-    print(f"{'='*55}")
-
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    for regime_on, label in [(False,"WITHOUT regime gate"), (True,"WITH regime gate")]:
-        print(f"\n--- {label} ---")
-        r = run(args.start, args.end, use_regime=regime_on, verbose=args.verbose)
-        if not r:
+        if open_ == 0 or close_ == 0:
+            no_data_days += 1
             continue
-        s = r["summary"]
-        print(f"  Return:          {s['total_pnl_pct']:+.2f}%  (${s['total_pnl']:+,.2f})")
-        print(f"  SPY:             {s['spy_pct']:+.2f}%")
-        print(f"  Sharpe:          {s['sharpe_annualized']:.3f}")
-        print(f"  Max Drawdown:    ${s['max_drawdown']:,.2f}")
-        print(f"  Trades:          {s['total_trades']}  (W:{s['wins']} / L:{s['losses']})")
-        print(f"  Hit Rate:        {s['hit_rate_pct']:.1f}%")
-        if regime_on:
-            print(f"  Bearish skipped: {s['bearish_days_skipped']} days")
-        tag = "regime" if regime_on else "baseline"
-        out = os.path.join(DATA_DIR, f"backtest_{tag}.json")
-        json.dump(r, open(out,"w"), indent=2, default=str)
-        print(f"  Saved: {out}")
+
+        ret_pct = (close_ - open_) / open_ * 100
+        pnl     = POSITION_SZ * (ret_pct / 100)
+        won     = ret_pct > 0
+
+        day_pnl    += pnl
+        total_trades += 1
+        if won: wins += 1
+        else:   losses += 1
+
+        day_trades.append({
+            "ticker":   t,
+            "vst":      pick["vst"],
+            "rv":       pick["rv"],
+            "rs":       pick["rs"],
+            "rt":       pick["rt"],
+            "open":     round(open_, 2),
+            "close":    round(close_, 2),
+            "ret_pct":  round(ret_pct, 3),
+            "pnl":      round(pnl, 2),
+            "won":      won
+        })
+
+    cumulative_pnl += day_pnl
+    daily_results.append({
+        "date":            day,
+        "next_day":        next_day,
+        "picks":           day_trades,
+        "day_pnl":         round(day_pnl, 2),
+        "cumulative_pnl":  round(cumulative_pnl, 2),
+    })
+
+# ── Summary stats ─────────────────────────────────────────────────────────────
+
+hit_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+
+# Sharpe (daily returns, annualized)
+day_pnls = [d["day_pnl"] for d in daily_results if d["picks"]]
+if len(day_pnls) > 1:
+    import statistics
+    mean_pnl   = statistics.mean(day_pnls)
+    std_pnl    = statistics.stdev(day_pnls)
+    sharpe     = (mean_pnl / std_pnl * (252 ** 0.5)) if std_pnl > 0 else 0
+else:
+    sharpe = 0
+
+# Max drawdown
+peak = 0
+max_dd = 0
+running = 0
+for d in daily_results:
+    running += d["day_pnl"]
+    if running > peak:
+        peak = running
+    dd = peak - running
+    if dd > max_dd:
+        max_dd = dd
+
+# Best/worst days
+sorted_days = sorted([d for d in daily_results if d["picks"]], key=lambda x: x["day_pnl"])
+worst_days  = sorted_days[:5]
+best_days   = sorted_days[-5:][::-1]
+
+# Win streaks
+streak = 0
+max_streak = 0
+lose_streak = 0
+max_lose_streak = 0
+for d in daily_results:
+    if d.get("picks"):
+        if d["day_pnl"] > 0:
+            streak += 1
+            lose_streak = 0
+            max_streak = max(max_streak, streak)
+        else:
+            lose_streak += 1
+            streak = 0
+            max_lose_streak = max(max_lose_streak, lose_streak)
+
+summary = {
+    "generated_at":      datetime.now().isoformat(),
+    "rank_mode":         RANK_MODE,
+    "backtest_start":    trading_dates[0],
+    "backtest_end":      trading_dates[-1],
+    "total_trading_days": len(trading_dates),
+    "days_with_picks":   len([d for d in daily_results if d["picks"]]),
+    "top_n":             TOP_N,
+    "min_vst":           MIN_VST,
+    "position_size":     POSITION_SZ,
+    "total_trades":      total_trades,
+    "wins":              wins,
+    "losses":            losses,
+    "hit_rate_pct":      round(hit_rate, 1),
+    "total_pnl":         round(cumulative_pnl, 2),
+    "total_capital":     TOP_N * POSITION_SZ,
+    "position_size":     POSITION_SZ,
+    "total_pnl_pct":     round(cumulative_pnl / (TOP_N * POSITION_SZ) * 100, 2),
+    "sharpe_annualized": round(sharpe, 3),
+    "max_drawdown":      round(max_dd, 2),
+    "max_win_streak":    max_streak,
+    "max_lose_streak":   max_lose_streak,
+    "no_data_skipped":   no_data_days,
+    "bearish_days_skipped": len([d for d in daily_results if d.get("note") == "BEARISH regime"]),
+}
+
+output = {
+    "summary":       summary,
+    "daily":         daily_results,
+    "best_days":     best_days,
+    "worst_days":    worst_days,
+}
+
+key = f"{RANK_MODE}{OUT_SUFFIX}"
+mode_file = os.path.join(DATA_DIR, f"results_{key}.json")
+json.dump(output, open(mode_file, "w"), indent=2)
+# results.json = safety mode (default dashboard)
+if RANK_MODE == "safety" and not OUT_SUFFIX:
+    json.dump(output, open(OUT_FILE, "w"), indent=2)
+
+print("=" * 55)
+print(f"  Backtest: {summary['backtest_start']} → {summary['backtest_end']}")
+print(f"  Trading days:  {summary['total_trading_days']}")
+print(f"  Total trades:  {total_trades}  (W:{wins} / L:{losses})")
+print(f"  Hit rate:      {hit_rate:.1f}%")
+print(f"  Total P&L:     ${cumulative_pnl:,.2f}  ({summary['total_pnl_pct']}%)")
+print(f"  Sharpe:        {sharpe:.3f}")
+print(f"  Max drawdown:  ${max_dd:,.2f}")
+print(f"  Win streak:    {max_streak}  |  Lose streak: {max_lose_streak}")
+print("=" * 55)
+print(f"\nSaved to {OUT_FILE}")

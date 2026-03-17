@@ -26,7 +26,12 @@ def cum_chart(daily, cid, color):
 
 def trade_rows(result, n=100):
     rows = ""
-    trades = result.get("trades", [])
+    # simulate.py nests trades under daily[].picks
+    trades = []
+    for d in result.get("daily", []):
+        for t in d.get("picks", []):
+            t["date"] = d["date"]
+            trades.append(t)
     for t in trades[:n]:
         pnl = t.get("pnl", 0)
         cls = "up" if pnl >= 0 else "down"
