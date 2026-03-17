@@ -2,7 +2,7 @@ name: Close Positions (4:00 PM)
 
 on:
   schedule:
-    - cron: '0 20 * * 1-5'    # 4:00 PM EST = 20:00 UTC Mon-Fri
+    - cron: '0 20 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -12,15 +12,32 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: pip install -r requirements.txt
-      - name: Close positions + log P&L
-        run: python -m stockscout3.portfolio close
+      - run: pip install yfinance pandas numpy requests
+
+      - name: Pull today's trade file
         env:
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      - name: Commit results
+          PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
         run: |
+          git clone --depth=1 https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git tmp-pi
+          mkdir -p data/trades
+          cp tmp-pi/docs/stockscout3/trades/*.json data/trades/ 2>/dev/null || true
+          cp tmp-pi/docs/stockscout3/trump_predictions.json data/ 2>/dev/null || true
+
+      - name: Close positions
+        run: python3 -m stockscout3.portfolio close
+
+      - name: Generate dashboard + publish
+        env:
+          PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
+        run: |
+          python3 stockscout3/dashboard.py
+          cd tmp-pi
           git config user.name "stockscout3-bot"
           git config user.email "bot@themenonlab.com"
-          git add data/trades/ || true
+          git fetch origin main && git reset --hard FETCH_HEAD
+          mkdir -p docs/stockscout3/trades
+          cp ../data/trades/*.json docs/stockscout3/trades/ 2>/dev/null || true
+          cp ../data/dashboard.html docs/stockscout3/index.html
+          git add docs/stockscout3/
           git diff --cached --quiet || git commit -m "close: $(date -u +%Y-%m-%d)"
-          git push || true
+          git push https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git HEAD:main

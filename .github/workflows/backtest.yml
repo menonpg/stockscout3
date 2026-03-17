@@ -6,19 +6,18 @@ on:
     paths:
       - 'stockscout3/backtest.py'
       - 'stockscout3/regime.py'
+      - 'stockscout3/report.py'
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-
       - run: pip install pandas numpy requests yfinance
 
-      - name: Fetch OHLC cache from stockscout-backtest
+      - name: Fetch OHLC cache
         env:
           PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
         run: |
@@ -29,35 +28,41 @@ jobs:
 
       - name: Fetch Trump predictions
         run: |
-          python3 - << 'PYEOF'
+          python3 -c "
           import requests, json
-          r = requests.get("https://raw.githubusercontent.com/sstklen/trump-code/main/data/predictions_log.json", timeout=30)
+          r = requests.get('https://raw.githubusercontent.com/sstklen/trump-code/main/data/predictions_log.json', timeout=30)
           r.raise_for_status()
           data = r.json()
-          json.dump(data, open("data/trump_predictions.json","w"), indent=2)
-          print(f"Fetched {len(data)} predictions")
-          PYEOF
+          json.dump(data, open('data/trump_predictions.json','w'), indent=2)
+          print(f'Fetched {len(data)} predictions')
+          "
 
-      - name: Run backtest (baseline + regime)
-        run: python3 -m stockscout3.backtest --start 2024-01-01 --verbose
+      - name: Run backtest
+        run: python3 -m stockscout3.backtest --start 2024-01-01
 
-      - name: Generate report
+      - name: Generate backtest report
         run: python3 stockscout3/report.py
+
+      - name: Generate live dashboard
+        run: python3 stockscout3/dashboard.py
 
       - name: Publish to pi-workspace
         env:
           PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
         run: |
           git clone --depth=1 https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git tmp-pi
-          mkdir -p tmp-pi/docs/stockscout3
-          cp data/stockscout3_report.html tmp-pi/docs/stockscout3/index.html
-          cp data/backtest_baseline.json tmp-pi/docs/stockscout3/ 2>/dev/null || true
-          cp data/backtest_regime.json   tmp-pi/docs/stockscout3/ 2>/dev/null || true
+          # Live dashboard → /stockscout3/index.html
+          mkdir -p tmp-pi/docs/stockscout3/backtest
+          cp data/dashboard.html          tmp-pi/docs/stockscout3/index.html
+          # Backtest → /stockscout3/backtest/index.html
+          cp data/stockscout3_report.html tmp-pi/docs/stockscout3/backtest/index.html
+          cp data/backtest_baseline.json  tmp-pi/docs/stockscout3/ 2>/dev/null || true
+          cp data/backtest_regime.json    tmp-pi/docs/stockscout3/ 2>/dev/null || true
           cd tmp-pi
           git config user.name "stockscout3-bot"
           git config user.email "bot@themenonlab.com"
           git fetch origin main
           git reset --hard FETCH_HEAD
           git add docs/stockscout3/
-          git diff --cached --quiet || git commit -m "backtest: stockscout3 $(date -u +%Y-%m-%d)"
+          git diff --cached --quiet || git commit -m "stockscout3: dashboard + backtest $(date -u +%Y-%m-%d)"
           git push https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git HEAD:main

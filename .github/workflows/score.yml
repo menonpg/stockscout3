@@ -2,7 +2,7 @@ name: Score (8:30 AM)
 
 on:
   schedule:
-    - cron: '30 12 * * 1-5'   # 8:30 AM EST = 12:30 UTC Mon-Fri
+    - cron: '30 12 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -12,15 +12,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: pip install -r requirements.txt
-      - name: Score universe
-        run: python -m stockscout3.scorer
-        env:
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      - name: Commit scores
+      - run: pip install yfinance pandas numpy requests
+
+      - name: Fetch Trump predictions
         run: |
+          python3 -c "
+          import requests, json
+          r = requests.get('https://raw.githubusercontent.com/sstklen/trump-code/main/data/predictions_log.json', timeout=30)
+          r.raise_for_status()
+          json.dump(r.json(), open('data/trump_predictions.json','w'), indent=2)
+          print(f'Fetched {len(r.json())} predictions')
+          "
+
+      - name: Score universe
+        run: python3 -m stockscout3.scorer
+
+      - name: Generate dashboard
+        run: python3 stockscout3/dashboard.py
+
+      - name: Publish dashboard
+        env:
+          PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
+        run: |
+          git clone --depth=1 https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git tmp-pi
+          mkdir -p tmp-pi/docs/stockscout3
+          cp data/dashboard.html     tmp-pi/docs/stockscout3/index.html
+          cp data/scores_latest.json tmp-pi/docs/stockscout3/ 2>/dev/null || true
+          cd tmp-pi
           git config user.name "stockscout3-bot"
           git config user.email "bot@themenonlab.com"
-          git add data/scores_latest.json || true
+          git fetch origin main && git reset --hard FETCH_HEAD
+          git add docs/stockscout3/
           git diff --cached --quiet || git commit -m "scores: $(date -u +%Y-%m-%d)"
-          git push || true
+          git push https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git HEAD:main

@@ -2,7 +2,7 @@ name: Open Positions (9:30 AM)
 
 on:
   schedule:
-    - cron: '30 13 * * 1-5'   # 9:30 AM EST = 13:30 UTC Mon-Fri
+    - cron: '30 13 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -12,15 +12,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: pip install -r requirements.txt
-      - name: Open positions
-        run: python -m stockscout3.portfolio open
+      - run: pip install yfinance pandas numpy requests
+
+      - name: Pull latest data from pi-workspace
         env:
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-      - name: Commit trade file
+          PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
         run: |
+          git clone --depth=1 https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git tmp-pi
+          cp tmp-pi/docs/stockscout3/scores_latest.json data/ 2>/dev/null || true
+          cp tmp-pi/docs/stockscout3/backtest_regime.json data/ 2>/dev/null || true
+
+      - name: Fetch Trump predictions
+        run: |
+          python3 -c "
+          import requests, json
+          r = requests.get('https://raw.githubusercontent.com/sstklen/trump-code/main/data/predictions_log.json', timeout=30)
+          r.raise_for_status()
+          json.dump(r.json(), open('data/trump_predictions.json','w'), indent=2)
+          "
+
+      - name: Open positions
+        run: python3 -m stockscout3.portfolio open
+
+      - name: Generate dashboard + publish
+        env:
+          PI_TOKEN: ${{ secrets.PI_WORKSPACE_TOKEN }}
+        run: |
+          python3 stockscout3/dashboard.py
+          cd tmp-pi
           git config user.name "stockscout3-bot"
           git config user.email "bot@themenonlab.com"
-          git add data/trades/ || true
+          git fetch origin main && git reset --hard FETCH_HEAD
+          mkdir -p docs/stockscout3/trades
+          cp ../data/trades/*.json docs/stockscout3/trades/ 2>/dev/null || true
+          cp ../data/dashboard.html docs/stockscout3/index.html
+          git add docs/stockscout3/
           git diff --cached --quiet || git commit -m "open: $(date -u +%Y-%m-%d)"
-          git push || true
+          git push https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git HEAD:main
