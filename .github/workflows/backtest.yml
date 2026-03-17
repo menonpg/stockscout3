@@ -58,4 +58,4 @@ jobs:
           git config user.email "bot@themenonlab.com"
           git add docs/stockscout3/
           git diff --cached --quiet || git commit -m "backtest: stockscout3 $(date -u +%Y-%m-%d)"
-          git push https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git main
+          git push https://x-access-token:${PI_TOKEN}@github.com/menonpg/pi-workspace.git HEAD:main
