@@ -36,7 +36,8 @@ def score_universe(tickers=None, verbose=True) -> pd.DataFrame:
         tickers = SP100
 
     spy = yf.download("SPY", period="30d", auto_adjust=True, progress=False)
-    spy_ret = float((spy["Close"].iloc[-1] / spy["Close"].iloc[-22]) - 1) if len(spy) >= 22 else 0.0
+    spy_close = spy["Close"].squeeze()
+    spy_ret = float((spy_close.iloc[-1] / spy_close.iloc[-22]) - 1) if len(spy_close) >= 22 else 0.0
 
     rows = []
     for tkr in tickers:
